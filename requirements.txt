@@ -1,8 +1,6 @@
-streamlit==1.26.0
-transformers==4.38.2
-torch==2.2.1
-sentence-transformers==2.2.2
+streamlit
+transformers
+torch
+sentence-transformers
 scikit-learn
 pdfminer.six
-huggingface_hub==0.14.1
-rich==13.7.1
