@@ -5,6 +5,8 @@ from transformers import pipeline, AutoTokenizer, AutoModelForQuestionAnswering
 import torch
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
+from streamlit_option_menu import option_menu
+import streamlit.components.v1 as components
 
 # ----------------------- Load Models -----------------------
 @st.cache_resource
@@ -21,6 +23,31 @@ def load_embedder():
 
 summarizer, tokenizer, qa_model, generator = load_models()
 embedder = load_embedder()
+
+# ----------------------- CSS Animations -----------------------
+st.markdown("""
+    <style>
+    .fade-in {
+        animation: fadeIn 1s ease-in;
+    }
+    @keyframes fadeIn {
+        0% { opacity: 0; transform: translateY(10px); }
+        100% { opacity: 1; transform: translateY(0); }
+    }
+    .stTextInput > div > div > input {
+        transition: all 0.3s ease-in-out;
+    }
+    .source-box {
+        background-color: #eeeeff;
+        padding: 0.75rem;
+        border-left: 5px solid #6c63ff;
+        margin-top: 0.5rem;
+        font-size: 0.9rem;
+        font-style: italic;
+        color: #333;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
 # ----------------------- Helper Functions -----------------------
 def extract_text(uploaded_file):
@@ -44,7 +71,7 @@ def safe_summarize(text, max_chunk=1000):
         summaries.append(summary[0]["summary_text"])
     return " ".join(" ".join(summaries).split()[:150])
 
-def select_relevant_window(context, question, window_size=1024):
+def select_relevant_window(context, question, window_size=400):
     windows = [context[i:i + window_size] for i in range(0, len(context), window_size // 2)]
     question_embedding = embedder.encode(question)
     window_embeddings = embedder.encode(windows)
@@ -61,9 +88,9 @@ def answer_question(context, question):
         end_idx = torch.argmax(outputs.end_logits) + 1
         answer_tokens = inputs["input_ids"][0][start_idx:end_idx]
         answer = tokenizer.decode(answer_tokens, skip_special_tokens=True).strip()
-        return answer if answer else "Could not find a clear answer."
+        return answer if answer else "Could not find a clear answer.", best_window
     except Exception as e:
-        return f"Error: {e}"
+        return f"Error: {e}", ""
 
 def generate_questions(document_text, num=5, offset=0):
     chunk = document_text[offset:offset + 2000]
@@ -101,36 +128,52 @@ def generate_questions(document_text, num=5, offset=0):
 
 # ----------------------- Streamlit App -----------------------
 try:
+    st.set_page_config(page_title="Gen AI Assistant", layout="wide")
     st.title("🧠 Gen AI Document Assistant")
 
     uploaded_file = st.file_uploader("Upload a PDF or TXT document", type=["pdf", "txt"])
 
     if uploaded_file:
-        if "last_uploaded_file" not in st.session_state or st.session_state.last_uploaded_file != uploaded_file.name:
-            st.session_state.clear()
-            st.session_state.last_uploaded_file = uploaded_file.name
-            text = extract_text(uploaded_file)
-            st.session_state.text = text
-            st.session_state.summary = safe_summarize(text)
-            st.session_state.offset = 0
-            st.session_state.questions = generate_questions(text, offset=0)
-        else:
-            text = st.session_state.text
+        with st.spinner("Processing your document..."):
+            if "last_uploaded_file" not in st.session_state or st.session_state.last_uploaded_file != uploaded_file.name:
+                st.session_state.clear()
+                st.session_state.last_uploaded_file = uploaded_file.name
+                text = extract_text(uploaded_file)
+                st.session_state.text = text
+                st.session_state.summary = safe_summarize(text)
+                st.session_state.offset = 0
+                st.session_state.questions = generate_questions(text, offset=0)
+            else:
+                text = st.session_state.text
 
         st.success("✅ File uploaded successfully!")
 
         st.subheader("📄 Document Summary")
-        st.write(st.session_state.summary)
+        st.markdown(f'<div class="fade-in">{st.session_state.summary}</div>', unsafe_allow_html=True)
 
-        mode = st.radio("Choose your interaction mode:", ["Ask Anything", "Challenge Me"])
+        selected_mode = option_menu(
+            menu_title=None,
+            options=["Ask Anything", "Challenge Me"],
+            icons=["question-circle", "target"],
+            menu_icon=None,
+            default_index=0,
+            orientation="horizontal",
+            styles={
+                "container": {"padding": "0", "background-color": "#fafafa"},
+                "nav-link": {"font-size": "16px", "margin": "0", "color": "black"},
+                "nav-link-selected": {"background-color": "#6c63ff", "color": "white"},
+            }
+        )
 
-        if mode == "Ask Anything":
+        if selected_mode == "Ask Anything":
             st.subheader("❓ Ask Anything")
             question = st.text_input("Ask a question based on the document:")
             if question:
-                st.write("💡 Answer:", answer_question(st.session_state.text, question))
+                answer, source = answer_question(st.session_state.text, question)
+                st.markdown(f'<div class="fade-in"><strong>💡 Answer:</strong> {answer}</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="fade-in source-box">📌 Context: {source}</div>', unsafe_allow_html=True)
 
-        elif mode == "Challenge Me":
+        elif selected_mode == "Challenge Me":
             st.subheader("🎯 Challenge Mode: Comprehension Test")
 
             if st.button("🔄 Refresh Questions"):
@@ -140,7 +183,7 @@ try:
                 st.session_state.questions = generate_questions(st.session_state.text, offset=st.session_state.offset)
 
             if "questions" in st.session_state:
-                st.write("📜 Answer the following questions:")
+                st.markdown("<div class='fade-in'>📜 Answer the following questions:</div>", unsafe_allow_html=True)
                 all_answered = True
                 user_answers = []
 
@@ -154,11 +197,12 @@ try:
                     if st.button("✅ Evaluate Answers"):
                         st.subheader("🧪 Evaluation Results:")
                         for i, q in enumerate(st.session_state.questions):
-                            correct = answer_question(st.session_state.text, q)
+                            correct, context = answer_question(st.session_state.text, q)
                             user = user_answers[i]
                             st.markdown(f"**Q{i + 1}: {q}**")
                             st.markdown(f"🧠 **Your Answer**: {user}")
                             st.markdown(f"🔬 **Correct Answer**: {correct}")
+                            st.markdown(f'<div class="source-box">📌 Context: {context}</div>', unsafe_allow_html=True)
                             if correct.lower() in user.lower():
                                 st.success("✅ Your answer is close!")
                             else:

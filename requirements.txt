@@ -4,3 +4,4 @@ torch
 sentence-transformers
 scikit-learn
 pdfminer.six
+streamlit-option-menu
