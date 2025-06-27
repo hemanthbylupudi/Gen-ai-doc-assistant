@@ -1,4 +1,5 @@
 import streamlit as st
+import string
 import io
 import pdfminer.high_level
 import torch
@@ -45,7 +46,7 @@ st.markdown("""
     }
     </style>
 """, unsafe_allow_html=True)
-
+# ----------------------- Helper Functions -----------------------
 def extract_text(uploaded_file):
     if uploaded_file.type == "application/pdf":
         return pdfminer.high_level.extract_text(io.BytesIO(uploaded_file.read()))
@@ -175,8 +176,8 @@ try:
             text = extract_text(uploaded_file)
             st.session_state.text = text
             st.session_state.summary = safe_summarize(text)
-            st.session_state.questions = generate_questions(text, 5)  # Generate questions immediately
-            st.session_state.offset = 0  # Initialize offset
+            st.session_state.questions = generate_questions(text, 5)  
+            st.session_state.offset = 0 
 
         st.success("✅ File uploaded successfully!")
 
@@ -206,57 +207,71 @@ try:
                 st.markdown(f'<div class="fade-in"><strong>💡 Answer:</strong> {answer}</div>', unsafe_allow_html=True)
                 st.markdown(f'<div class="fade-in source-box">📌 Context: {source}</div>', unsafe_allow_html=True)
 
-        # ... [Previous imports and functions remain the same until the Challenge Me section] ...
 
         elif selected_mode == "Challenge Me":
             st.subheader("🎯 Challenge Mode: Comprehension Test")
 
-            # Add a button to refresh questions
+    
             if st.button("🔄 Refresh Questions"):
-                # Update the offset for the next chunk
+        
                 st.session_state.offset += 1000
                 if st.session_state.offset >= len(st.session_state.text):
-                    st.session_state.offset = 0  # Reset to 0 if at the end
+                    st.session_state.offset = 0  
                 st.session_state.questions = generate_questions(st.session_state.text, 5, st.session_state.offset)
-                # Clear previous evaluations when refreshing
+        
                 if 'evaluations' in st.session_state:
                     del st.session_state.evaluations
 
             if "questions" in st.session_state:
                 st.markdown("<div class='fade-in'>📜 Answer the following questions:</div>", unsafe_allow_html=True)
 
-                # Initialize evaluations in session state if not exists
+        
                 if 'evaluations' not in st.session_state:
                     st.session_state.evaluations = [None] * len(st.session_state.questions)
 
-                for i, q in enumerate(st.session_state.questions):
-                    col1, col2 = st.columns([4, 1])
-                    with col1:
-                        answer = st.text_input(f"Q{i + 1}: {q}", key=f"user_answer_{i}")
-                    with col2:
-                        if st.button(f"Evaluate Q{i+1}", key=f"eval_button_{i}"):
-                            if answer.strip():
-                                correct, context = answer_question(st.session_state.text, q)
-                                st.session_state.evaluations[i] = {
-                                    'user_answer': answer,
-                                    'correct_answer': correct,
-                                    'context': context,
-                                    'is_correct': correct.lower() in answer.lower()
-                                }
-                            else:
-                                st.warning("Please enter an answer before evaluating")
+        
+                user_answers = []
 
-                    # Show evaluation result if exists
+                for i, q in enumerate(st.session_state.questions):
+                    answer = st.text_input(f"Q{i + 1}: {q}", key=f"user_answer_{i}")
+                    user_answers.append(answer)
+
+        
+                all_answered = all(answer.strip() for answer in user_answers)
+
+        
+                if st.button("✅ Evaluate All", disabled=not all_answered):
+                    for i, q in enumerate(st.session_state.questions):
+                        if user_answers[i].strip():
+                            full_answer, context = answer_question(st.session_state.text, q)
+                    
+                            core_answer = full_answer.split('This information comes from')[0].strip()
+                            citation = full_answer.split('This information comes from')[1].strip() if 'This information comes from' in full_answer else ''
+                    
+                            normalized_user_answer = user_answers[i].lower().translate(str.maketrans('', '', string.punctuation)).strip()
+                            normalized_core_answer = core_answer.lower().translate(str.maketrans('', '', string.punctuation)).strip()
+                    
+                            st.session_state.evaluations[i] = {
+                                'user_answer': user_answers[i],
+                                'core_answer': core_answer,
+                                'citation': citation,
+                                'context': context,
+                                'is_correct': (normalized_user_answer in normalized_core_answer) or 
+                                     (normalized_core_answer in normalized_user_answer)
+                            }
+
+                for i in range(len(st.session_state.questions)):
                     if st.session_state.evaluations[i] is not None:
                         eval_data = st.session_state.evaluations[i]
                         st.markdown(f"**Evaluation for Q{i + 1}:**")
                         st.markdown(f"🧠 **Your Answer**: {eval_data['user_answer']}")
-                        st.markdown(f"🔬 **Correct Answer**: {eval_data['correct_answer']}")
-                        st.markdown(f'<div class="source-box">📌 Context: {eval_data["context"]}</div>', unsafe_allow_html=True)
+                        st.markdown(f"🔬 **Correct Answer**: {eval_data['core_answer']}")
+                        st.markdown(f'📌 **Source**: {eval_data["citation"]}')
+                        st.markdown(f'<div class="source-box">📚 **Context**: {eval_data["context"]}</div>', unsafe_allow_html=True)
                         if eval_data['is_correct']:
-                            st.success("✅ Your answer is correct!")
+                            st.success("✅ Correct!")
                         else:
-                            st.warning("❌ Not quite. Review the correct answer.")
+                            st.error("❌ Incorrect")
 
 except Exception as e:
     import traceback
