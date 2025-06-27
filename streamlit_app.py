@@ -7,6 +7,8 @@ from transformers import pipeline, AutoTokenizer, AutoModelForQuestionAnswering
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 from streamlit_option_menu import option_menu
+from difflib import SequenceMatcher
+
 
 @st.cache_resource
 def load_models():
@@ -146,19 +148,10 @@ Make sure:
             line = line.strip()
             if line.endswith("?") and line.lower() not in (q.lower() for q in questions):
                 questions.append(line)
-            if len(questions) >= num:
+            if len(questions) >= num:  # Ensure we only take 'num' questions
                 break
 
-        if len(questions) == 0:
-            raw_questions = []
-            for i in raw[3:]:
-                if len(i.strip()) > 10:
-                    raw_questions.append(i.strip())
-                if len(raw_questions) >= num:
-                    break
-            return raw_questions
-
-        return questions
+        return questions  # Return only the specified number of questions
     except Exception as e:
         return [f"Question generation failed: {e}"]
 
@@ -176,7 +169,7 @@ try:
             text = extract_text(uploaded_file)
             st.session_state.text = text
             st.session_state.summary = safe_summarize(text)
-            st.session_state.questions = generate_questions(text, 5)  
+            st.session_state.questions = generate_questions(text, 3)  # Generate exactly 3 questions
             st.session_state.offset = 0 
 
         st.success("✅ File uploaded successfully!")
@@ -207,73 +200,115 @@ try:
                 st.markdown(f'<div class="fade-in"><strong>💡 Answer:</strong> {answer}</div>', unsafe_allow_html=True)
                 st.markdown(f'<div class="fade-in source-box">📌 Context: {source}</div>', unsafe_allow_html=True)
 
-
         elif selected_mode == "Challenge Me":
             st.subheader("🎯 Challenge Mode: Comprehension Test")
-
     
             if st.button("🔄 Refresh Questions"):
-        
                 st.session_state.offset += 1000
                 if st.session_state.offset >= len(st.session_state.text):
-                    st.session_state.offset = 0  
-                st.session_state.questions = generate_questions(st.session_state.text, 5, st.session_state.offset)
-        
+                    st.session_state.offset = 0
+                st.session_state.questions = generate_questions(st.session_state.text, 3, st.session_state.offset)
                 if 'evaluations' in st.session_state:
                     del st.session_state.evaluations
 
             if "questions" in st.session_state:
                 st.markdown("<div class='fade-in'>📜 Answer the following questions:</div>", unsafe_allow_html=True)
 
-        
                 if 'evaluations' not in st.session_state:
                     st.session_state.evaluations = [None] * len(st.session_state.questions)
 
-        
+                # Store user answers
                 user_answers = []
-
+        
                 for i, q in enumerate(st.session_state.questions):
                     answer = st.text_input(f"Q{i + 1}: {q}", key=f"user_answer_{i}")
                     user_answers.append(answer)
 
-        
                 all_answered = all(answer.strip() for answer in user_answers)
 
-        
-                if st.button("✅ Evaluate All", disabled=not all_answered):
+                if st.button("✅ Evaluate All", disabled=not all_answered, type="primary"):
                     for i, q in enumerate(st.session_state.questions):
                         if user_answers[i].strip():
                             full_answer, context = answer_question(st.session_state.text, q)
                     
-                            core_answer = full_answer.split('This information comes from')[0].strip()
-                            citation = full_answer.split('This information comes from')[1].strip() if 'This information comes from' in full_answer else ''
+                            # Extract just the core answer and citation
+                            if "This information comes from" in full_answer:
+                                core_answer, citation = full_answer.split("This information comes from", 1)
+                                core_answer = core_answer.strip()
+                                citation = "This information comes from" + citation
+                            else:
+                                core_answer = full_answer
+                                citation = "Source not specified in document"
                     
-                            normalized_user_answer = user_answers[i].lower().translate(str.maketrans('', '', string.punctuation)).strip()
-                            normalized_core_answer = core_answer.lower().translate(str.maketrans('', '', string.punctuation)).strip()
+                            # Clean answers for comparison
+                            clean_user = user_answers[i].lower().translate(str.maketrans('', '', string.punctuation)).strip()
+                            clean_correct = core_answer.lower().translate(str.maketrans('', '', string.punctuation)).strip()
+                    
+                            # Smart evaluation logic
+                            is_correct = False
+                            evaluation_notes = ""
+                    
+                            if not clean_correct:
+                                is_correct = False
+                                evaluation_notes = "No definite answer could be found in the document."
+                            elif clean_user == clean_correct:
+                                is_correct = True
+                                evaluation_notes = "Your answer exactly matches the documented information."
+                            elif clean_user in clean_correct:
+                                is_correct = True
+                                evaluation_notes = "Your answer is contained within the documented information."
+                            elif clean_correct in clean_user:
+                                is_correct = True
+                                evaluation_notes = "The documented information is contained within your answer."
+                            elif any(word in clean_correct.split() for word in clean_user.split()):
+                                evaluation_notes = "Your answer contains some matching keywords but isn't fully accurate."
+                            else:
+                                evaluation_notes = "Your answer doesn't match the documented information."
                     
                             st.session_state.evaluations[i] = {
                                 'user_answer': user_answers[i],
                                 'core_answer': core_answer,
                                 'citation': citation,
                                 'context': context,
-                                'is_correct': (normalized_user_answer in normalized_core_answer) or 
-                                     (normalized_core_answer in normalized_user_answer)
+                                'is_correct': is_correct,
+                                'evaluation_notes': evaluation_notes,
+                                'similarity_score': SequenceMatcher(None, clean_user, clean_correct).ratio()
                             }
 
+                # Show detailed evaluations
                 for i in range(len(st.session_state.questions)):
                     if st.session_state.evaluations[i] is not None:
                         eval_data = st.session_state.evaluations[i]
-                        st.markdown(f"**Evaluation for Q{i + 1}:**")
-                        st.markdown(f"🧠 **Your Answer**: {eval_data['user_answer']}")
-                        st.markdown(f"🔬 **Correct Answer**: {eval_data['core_answer']}")
-                        st.markdown(f'📌 **Source**: {eval_data["citation"]}')
-                        st.markdown(f'<div class="source-box">📚 **Context**: {eval_data["context"]}</div>', unsafe_allow_html=True)
-                        if eval_data['is_correct']:
-                            st.success("✅ Correct!")
-                        else:
-                            st.error("❌ Incorrect")
+                
+                        with st.expander(f"Detailed Evaluation for Q{i + 1}", expanded=True):
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                st.markdown("### Your Answer")
+                                st.info(eval_data['user_answer'])
+                            with col2:
+                                st.markdown("### Documented Answer")
+                                st.info(eval_data['core_answer'])
+                    
+                            st.markdown("### Evaluation")
+                            if eval_data['is_correct']:
+                                st.success(f"✅ Correct - {eval_data['evaluation_notes']}")
+                                st.metric("Similarity Score", 
+                                        value=f"{eval_data['similarity_score']*100:.1f}%",
+                                        delta="High match with document")
+                            else:
+                                st.error(f"❌ Incorrect - {eval_data['evaluation_notes']}")
+                                st.metric("Similarity Score",
+                                        value=f"{eval_data['similarity_score']*100:.1f}%",
+                                        delta_color="inverse")
+                    
+                            st.markdown("### Source Information")
+                            st.markdown(eval_data['citation'])
+                    
+                            st.markdown("### Relevant Context from Document")
+                            st.markdown(f'<div class="source-box">{eval_data["context"]}</div>', unsafe_allow_html=True)
 
 except Exception as e:
     import traceback
     st.error("🚨 Application Error:")
     st.code(traceback.format_exc())
+
