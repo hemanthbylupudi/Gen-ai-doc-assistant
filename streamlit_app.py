@@ -12,7 +12,7 @@ def load_models():
     summarizer = pipeline("summarization", model="sshleifer/distilbart-cnn-12-6", device=-1)
     tokenizer = AutoTokenizer.from_pretrained("bert-large-uncased-whole-word-masking-finetuned-squad")
     qa_model = AutoModelForQuestionAnswering.from_pretrained("bert-large-uncased-whole-word-masking-finetuned-squad")
-    generator = pipeline("text-generation", model="google/flan-t5-base", device=-1)
+    generator = pipeline("text-generation", model="gpt2", device=-1)
     return summarizer, tokenizer, qa_model, generator
 
 @st.cache_resource
@@ -109,25 +109,26 @@ def answer_question(context, question):
                 sentence_embeddings = embedder.encode(sentences)
                 best_sentence = sentences[cosine_similarity([question_embedding], sentence_embeddings).argmax()]
                 return f"Relevant information: {best_sentence} ({citation})", best_window
-            return f"Could not find specific answer. {citation}", best_window
+            return f"Could not find specific answer."
     except Exception as e:
         return f"Error: {e}", ""
 
-def generate_questions(document_text, num=5, offset=0):
+def generate_questions(document_text, num=3, offset=0):
     chunk = document_text[offset:offset + 1000]
     if len(chunk.strip().split()) < 30:
         return ["Text too short to generate questions."]
 
-    prompt = f"""
-    Based on the following content, generate {num} exam-style, clear and specific questions:
-    \"\"\"{chunk}\"\"\"
-    Make sure:
-    - Questions are strictly based on the text
-    - No external facts
-    - No duplicates
-    - Each question ends with a '?'
-    - Provide only questions without explanations
-    """
+    prompt = f"""Based on the following content, generate {num} exam-style, clear and specific questions:
+
+""" + chunk + """
+
+Make sure:
+- Questions are strictly based on the text
+- No external facts
+- No duplicates
+- Each question ends with a '?'
+- Provide only questions without explanations
+"""
 
     try:
         outputs = generator(
@@ -146,14 +147,24 @@ def generate_questions(document_text, num=5, offset=0):
                 questions.append(line)
             if len(questions) >= num:
                 break
-        return questions if questions else raw
+
+        if len(questions) == 0:
+            raw_questions = []
+            for i in raw[3:]:
+                if len(i.strip()) > 10:
+                    raw_questions.append(i.strip())
+                if len(raw_questions) >= num:
+                    break
+            return raw_questions
+
+        return questions
     except Exception as e:
         return [f"Question generation failed: {e}"]
 
 # ----------------------- Streamlit App -----------------------
 try:
     st.set_page_config(page_title="Gen AI Assistant", layout="wide")
-    st.title("\U0001F9E0 Gen AI Document Assistant")
+    st.title("🧠 Gen AI Document Assistant")
 
     uploaded_file = st.file_uploader("Upload a PDF or TXT document", type=["pdf", "txt"])
 
@@ -164,12 +175,12 @@ try:
             text = extract_text(uploaded_file)
             st.session_state.text = text
             st.session_state.summary = safe_summarize(text)
-            st.session_state.questions = generate_questions(text, 5)
-            st.session_state.offset = 0
+            st.session_state.questions = generate_questions(text, 5)  # Generate questions immediately
+            st.session_state.offset = 0  # Initialize offset
 
-        st.success("\u2705 File uploaded successfully!")
+        st.success("✅ File uploaded successfully!")
 
-        st.subheader("\ud83d\udcc4 Document Summary")
+        st.subheader("📄 Document Summary")
         if "summary" in st.session_state:
             st.markdown(f'<div class="fade-in">{st.session_state.summary}</div>', unsafe_allow_html=True)
 
@@ -188,44 +199,66 @@ try:
         )
 
         if selected_mode == "Ask Anything":
-            st.subheader("\u2753 Ask Anything")
+            st.subheader("❓ Ask Anything")
             question = st.text_input("Ask a question based on the document:")
             if question:
                 answer, source = answer_question(st.session_state.text, question)
-                st.markdown(f'<div class="fade-in"><strong>\U0001F4A1 Answer:</strong> {answer}</div>', unsafe_allow_html=True)
-                st.markdown(f'<div class="fade-in source-box">\ud83d\udccc Context: {source}</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="fade-in"><strong>💡 Answer:</strong> {answer}</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="fade-in source-box">📌 Context: {source}</div>', unsafe_allow_html=True)
+
+        # ... [Previous imports and functions remain the same until the Challenge Me section] ...
 
         elif selected_mode == "Challenge Me":
-            st.subheader("\ud83c\udfaf Challenge Mode: Comprehension Test")
+            st.subheader("🎯 Challenge Mode: Comprehension Test")
 
-            if st.button("\U0001F504 Refresh Questions"):
-                st.session_state.offset += 2000
+            # Add a button to refresh questions
+            if st.button("🔄 Refresh Questions"):
+                # Update the offset for the next chunk
+                st.session_state.offset += 1000
                 if st.session_state.offset >= len(st.session_state.text):
-                    st.session_state.offset = 0
-                st.session_state.questions = generate_questions(st.session_state.text, offset=st.session_state.offset)
+                    st.session_state.offset = 0  # Reset to 0 if at the end
+                st.session_state.questions = generate_questions(st.session_state.text, 5, st.session_state.offset)
+                # Clear previous evaluations when refreshing
+                if 'evaluations' in st.session_state:
+                    del st.session_state.evaluations
 
             if "questions" in st.session_state:
-                st.markdown("<div class='fade-in'>\ud83d\udcdc Answer the following questions:</div>", unsafe_allow_html=True)
+                st.markdown("<div class='fade-in'>📜 Answer the following questions:</div>", unsafe_allow_html=True)
 
-                user_answers = []
+                # Initialize evaluations in session state if not exists
+                if 'evaluations' not in st.session_state:
+                    st.session_state.evaluations = [None] * len(st.session_state.questions)
+
                 for i, q in enumerate(st.session_state.questions):
-                    answer = st.text_input(f"Q{i + 1}: {q}", key=f"user_answer_{i}")
-                    user_answers.append(answer)
+                    col1, col2 = st.columns([4, 1])
+                    with col1:
+                        answer = st.text_input(f"Q{i + 1}: {q}", key=f"user_answer_{i}")
+                    with col2:
+                        if st.button(f"Evaluate Q{i+1}", key=f"eval_button_{i}"):
+                            if answer.strip():
+                                correct, context = answer_question(st.session_state.text, q)
+                                st.session_state.evaluations[i] = {
+                                    'user_answer': answer,
+                                    'correct_answer': correct,
+                                    'context': context,
+                                    'is_correct': correct.lower() in answer.lower()
+                                }
+                            else:
+                                st.warning("Please enter an answer before evaluating")
 
-                if st.button("\u2705 Evaluate Answers"):
-                    st.subheader("\U0001F9EA Evaluation Results:")
-                    for i, q in enumerate(st.session_state.questions):
-                        correct, context = answer_question(st.session_state.text, q)
-                        user = user_answers[i]
-                        st.markdown(f"**Q{i + 1}: {q}**")
-                        st.markdown(f"\U0001F9E0 **Your Answer**: {user}")
-                        st.markdown(f"\ud83d\udd2c **Correct Answer**: {correct}")
-                        st.markdown(f'<div class="source-box">\ud83d\udccc Context: {context}</div>', unsafe_allow_html=True)
-                        if correct.lower() in user.lower():
-                            st.success("\u2705 Your answer is close!")
+                    # Show evaluation result if exists
+                    if st.session_state.evaluations[i] is not None:
+                        eval_data = st.session_state.evaluations[i]
+                        st.markdown(f"**Evaluation for Q{i + 1}:**")
+                        st.markdown(f"🧠 **Your Answer**: {eval_data['user_answer']}")
+                        st.markdown(f"🔬 **Correct Answer**: {eval_data['correct_answer']}")
+                        st.markdown(f'<div class="source-box">📌 Context: {eval_data["context"]}</div>', unsafe_allow_html=True)
+                        if eval_data['is_correct']:
+                            st.success("✅ Your answer is correct!")
                         else:
-                            st.warning("\u274C Not quite. Review the correct answer.")
+                            st.warning("❌ Not quite. Review the correct answer.")
+
 except Exception as e:
     import traceback
-    st.error("\ud83d\udea8 Application Error:")
+    st.error("🚨 Application Error:")
     st.code(traceback.format_exc())
