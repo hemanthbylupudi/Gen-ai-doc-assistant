@@ -1,5 +1,4 @@
 import streamlit as st
-import string
 import io
 import pdfminer.high_level
 import torch
@@ -8,8 +7,10 @@ from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 from streamlit_option_menu import option_menu
 from difflib import SequenceMatcher
+import string
 
 
+# ----------------------- Caching Models -----------------------
 @st.cache_resource
 def load_models():
     summarizer = pipeline("summarization", model="sshleifer/distilbart-cnn-12-6", device=-1)
@@ -25,6 +26,7 @@ def load_embedder():
 summarizer, tokenizer, qa_model, generator = load_models()
 embedder = load_embedder()
 
+# ----------------------- CSS Styling -----------------------
 st.markdown("""
     <style>
     .fade-in {
@@ -33,9 +35,6 @@ st.markdown("""
     @keyframes fadeIn {
         0% { opacity: 0; transform: translateY(10px); }
         100% { opacity: 1; transform: translateY(0); }
-    }
-    .stTextInput > div > div > input {
-        transition: all 0.3s ease-in-out;
     }
     .source-box {
         background-color: #eeeeff;
@@ -48,6 +47,7 @@ st.markdown("""
     }
     </style>
 """, unsafe_allow_html=True)
+
 # ----------------------- Helper Functions -----------------------
 def extract_text(uploaded_file):
     if uploaded_file.type == "application/pdf":
@@ -64,9 +64,7 @@ def safe_summarize(text, max_chunk=1000):
         if len(input_words) < 30:
             summaries.append(" ".join(input_words))
             continue
-        dynamic_max = min(150, len(input_words))
-        dynamic_min = max(20, min(50, int(len(input_words) * 0.3)))
-        summary = summarizer(chunk, max_length=dynamic_max, min_length=dynamic_min, do_sample=False)
+        summary = summarizer(chunk, max_length=150, min_length=30, do_sample=False)
         summaries.append(summary[0]["summary_text"])
     return " ".join(" ".join(summaries).split()[:150])
 
@@ -81,7 +79,6 @@ def answer_question(context, question):
     try:
         best_window = select_relevant_window(context, question)
         inputs = tokenizer(question, best_window, return_tensors="pt", truncation=True, max_length=512)
-
         with torch.no_grad():
             outputs = qa_model(**inputs)
 
@@ -90,225 +87,131 @@ def answer_question(context, question):
         answer_tokens = inputs["input_ids"][0][start_idx:end_idx]
         answer = tokenizer.decode(answer_tokens, skip_special_tokens=True).strip()
 
-        window_start = context.find(best_window)
-        window_end = window_start + len(best_window)
-        paragraphs = [p.strip() for p in context.split('\n') if p.strip()]
-        section = None
-
-        for i, p in enumerate(paragraphs):
-            if best_window in p:
-                section = i + 1
-                break
-
-        citation = (f"This information comes from {'section ' + str(section) if section else 'the document'} "
-                   f"[spanning positions {window_start}-{window_end} in the text].")
-
-        if answer and answer.lower() in context.lower():
-            return f"{answer} {citation}", best_window
+        if answer:
+            return f"{answer} (context window matched)", best_window
         else:
             sentences = [s.strip() for s in best_window.split('.') if s.strip()]
             if sentences:
                 question_embedding = embedder.encode(question)
                 sentence_embeddings = embedder.encode(sentences)
                 best_sentence = sentences[cosine_similarity([question_embedding], sentence_embeddings).argmax()]
-                return f"Relevant information: {best_sentence} ({citation})", best_window
-            return f"Could not find specific answer."
+                return f"Relevant info: {best_sentence}", best_window
+        return "Could not find specific answer.", best_window
     except Exception as e:
         return f"Error: {e}", ""
 
-def generate_questions(document_text, num=3, offset=0):
-    chunk = document_text[offset:offset + 1000]
+def generate_all_chunks(text, chunk_size=1500):
+    return [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+
+def generate_questions_from_chunk(chunk, num=3):
     if len(chunk.strip().split()) < 30:
-        return ["Text too short to generate questions."]
+        return []
 
-    prompt = f"""Based on the following content, generate {num} exam-style, clear and specific questions:
+    prompt = f"""Generate {num + 5} clear, specific, factual questions strictly based on the following content:
 
-""" + chunk + """
+{chunk}
 
-Make sure:
-- Questions are strictly based on the text
-- No external facts
-- No duplicates
-- Each question ends with a '?'
-- Provide only questions without explanations
+Rules:
+- Only output questions ending with '?'
+- No duplication
+- No answers or explanations
 """
 
     try:
-        outputs = generator(
-            prompt,
-            max_new_tokens=256,
-            num_return_sequences=1,
-            temperature=0.7,
-            top_k=40,
-            do_sample=True
-        )
+        outputs = generator(prompt, max_new_tokens=300, do_sample=True, top_k=60, temperature=0.9)
         raw = outputs[0]['generated_text'].split('\n')
         questions = []
         for line in raw:
             line = line.strip()
-            if line.endswith("?") and line.lower() not in (q.lower() for q in questions):
+            if line.endswith('?') and len(line) > 10:
                 questions.append(line)
-            if len(questions) >= num:  # Ensure we only take 'num' questions
-                break
-
-        return questions  # Return only the specified number of questions
-    except Exception as e:
-        return [f"Question generation failed: {e}"]
+                if len(questions) >= num:
+                    break
+        if len(questions) == 0:
+            raw_questions = []
+            for i in raw[3:]:
+                if len(i.strip()) > 10:
+                    raw_questions.append(i.strip())
+                if len(raw_questions) >= num:
+                    break
+            return raw_questions
+        return questions
+    except Exception:
+        return []
 
 # ----------------------- Streamlit App -----------------------
-try:
-    st.set_page_config(page_title="Gen AI Assistant", layout="wide")
-    st.title("🧠 Gen AI Document Assistant")
+st.set_page_config(page_title="Gen AI Assistant", layout="wide")
+st.title("🧠 Gen AI Document Assistant")
 
-    uploaded_file = st.file_uploader("Upload a PDF or TXT document", type=["pdf", "txt"])
+uploaded_file = st.file_uploader("Upload PDF or TXT", type=["pdf", "txt"])
 
-    if uploaded_file:
-        with st.spinner("Processing your document..."):
-            st.session_state.clear()
-            st.session_state.last_uploaded_file = uploaded_file.name
-            text = extract_text(uploaded_file)
-            st.session_state.text = text
-            st.session_state.summary = safe_summarize(text)
-            st.session_state.questions = generate_questions(text, 3)  # Generate exactly 3 questions
-            st.session_state.offset = 0 
+if uploaded_file:
+    st.session_state.text = extract_text(uploaded_file)
+    st.session_state.summary = safe_summarize(st.session_state.text)
+    st.session_state.chunks = generate_all_chunks(st.session_state.text)
+    st.session_state.chunk_index = 0
+    st.session_state.questions = generate_questions_from_chunk(st.session_state.chunks[0], 3)
 
-        st.success("✅ File uploaded successfully!")
+    st.subheader("📄 Summary")
+    st.markdown(f'<div class="fade-in">{st.session_state.summary}</div>', unsafe_allow_html=True)
 
-        st.subheader("📄 Document Summary")
-        if "summary" in st.session_state:
-            st.markdown(f'<div class="fade-in">{st.session_state.summary}</div>', unsafe_allow_html=True)
+    mode = option_menu(None, ["Ask Anything", "Challenge Me"], icons=["question-circle", "target"],
+                       default_index=0, orientation="horizontal",
+                       styles={"nav-link-selected": {"background-color": "#6c63ff", "color": "white"}})
 
-        selected_mode = option_menu(
-            menu_title=None,
-            options=["Ask Anything", "Challenge Me"],
-            icons=["question-circle", "target"],
-            menu_icon=None,
-            default_index=0,
-            orientation="horizontal",
-            styles={
-                "container": {"padding": "0", "background-color": "#fafafa"},
-                "nav-link": {"font-size": "16px", "margin": "0", "color": "black"},
-                "nav-link-selected": {"background-color": "#6c63ff", "color": "white"},
-            }
-        )
+    if mode == "Ask Anything":
+        st.subheader("❓ Ask a Question")
+        question = st.text_input("Enter your question:")
+        if question:
+            answer, context = answer_question(st.session_state.text, question)
+            st.markdown(f"**💡 Answer:** {answer}")
+            st.markdown(f"<div class='source-box'>{context}</div>", unsafe_allow_html=True)
 
-        if selected_mode == "Ask Anything":
-            st.subheader("❓ Ask Anything")
-            question = st.text_input("Ask a question based on the document:")
-            if question:
-                answer, source = answer_question(st.session_state.text, question)
-                st.markdown(f'<div class="fade-in"><strong>💡 Answer:</strong> {answer}</div>', unsafe_allow_html=True)
-                st.markdown(f'<div class="fade-in source-box">📌 Context: {source}</div>', unsafe_allow_html=True)
+    elif mode == "Challenge Me":
+        st.subheader("🎯 Comprehension Challenge")
 
-        elif selected_mode == "Challenge Me":
-            st.subheader("🎯 Challenge Mode: Comprehension Test")
-    
+        if st.session_state.questions:
             if st.button("🔄 Refresh Questions"):
-                st.session_state.offset += 1000
-                if st.session_state.offset >= len(st.session_state.text):
-                    st.session_state.offset = 0
-                st.session_state.questions = generate_questions(st.session_state.text, 3, st.session_state.offset)
-                if 'evaluations' in st.session_state:
-                    del st.session_state.evaluations
+                st.session_state.chunk_index += 1
+                if st.session_state.chunk_index >= len(st.session_state.chunks):
+                    st.session_state.chunk_index = 0
+                st.session_state.questions = generate_questions_from_chunk(
+                    st.session_state.chunks[st.session_state.chunk_index], 3
+                )
+                st.session_state.evaluations = [None] * 3
 
-            if "questions" in st.session_state:
-                st.markdown("<div class='fade-in'>📜 Answer the following questions:</div>", unsafe_allow_html=True)
+            answers = []
+            all_answered = True
+            for i, q in enumerate(st.session_state.questions):
+                ans = st.text_input(f"Q{i+1}: {q}", key=f"qa_{i}")
+                if not ans.strip():
+                    all_answered = False
+                answers.append(ans)
 
-                if 'evaluations' not in st.session_state:
-                    st.session_state.evaluations = [None] * len(st.session_state.questions)
-
-                # Store user answers
-                user_answers = []
-        
-                for i, q in enumerate(st.session_state.questions):
-                    answer = st.text_input(f"Q{i + 1}: {q}", key=f"user_answer_{i}")
-                    user_answers.append(answer)
-
-                all_answered = all(answer.strip() for answer in user_answers)
-
-                if st.button("✅ Evaluate All", disabled=not all_answered, type="primary"):
+            if st.button("✅ Evaluate All"):
+                if not all_answered:
+                    st.warning("⚠️ Please answer all questions before evaluation.")
+                else:
+                    st.session_state.evaluations = []
                     for i, q in enumerate(st.session_state.questions):
-                        if user_answers[i].strip():
-                            full_answer, context = answer_question(st.session_state.text, q)
-                    
-                            # Extract just the core answer and citation
-                            if "This information comes from" in full_answer:
-                                core_answer, citation = full_answer.split("This information comes from", 1)
-                                core_answer = core_answer.strip()
-                                citation = "This information comes from" + citation
-                            else:
-                                core_answer = full_answer
-                                citation = "Source not specified in document"
-                    
-                            # Clean answers for comparison
-                            clean_user = user_answers[i].lower().translate(str.maketrans('', '', string.punctuation)).strip()
-                            clean_correct = core_answer.lower().translate(str.maketrans('', '', string.punctuation)).strip()
-                    
-                            # Smart evaluation logic
-                            is_correct = False
-                            evaluation_notes = ""
-                    
-                            if not clean_correct:
-                                is_correct = False
-                                evaluation_notes = "No definite answer could be found in the document."
-                            elif clean_user == clean_correct:
-                                is_correct = True
-                                evaluation_notes = "Your answer exactly matches the documented information."
-                            elif clean_user in clean_correct:
-                                is_correct = True
-                                evaluation_notes = "Your answer is contained within the documented information."
-                            elif clean_correct in clean_user:
-                                is_correct = True
-                                evaluation_notes = "The documented information is contained within your answer."
-                            elif any(word in clean_correct.split() for word in clean_user.split()):
-                                evaluation_notes = "Your answer contains some matching keywords but isn't fully accurate."
-                            else:
-                                evaluation_notes = "Your answer doesn't match the documented information."
-                    
-                            st.session_state.evaluations[i] = {
-                                'user_answer': user_answers[i],
-                                'core_answer': core_answer,
-                                'citation': citation,
-                                'context': context,
-                                'is_correct': is_correct,
-                                'evaluation_notes': evaluation_notes,
-                                'similarity_score': SequenceMatcher(None, clean_user, clean_correct).ratio()
-                            }
+                        user = answers[i].strip().lower().translate(str.maketrans('', '', string.punctuation))
+                        gold, context = answer_question(st.session_state.text, q)
+                        gold_clean = gold.strip().lower().translate(str.maketrans('', '', string.punctuation))
+                        score = SequenceMatcher(None, user, gold_clean).ratio()
+                        correct = user in gold_clean or gold_clean in user or score > 0.65
+                        note = "High similarity" if correct else "Low similarity"
+                        st.session_state.evaluations.append((answers[i], gold, note, score, context))
 
-                # Show detailed evaluations
-                for i in range(len(st.session_state.questions)):
-                    if st.session_state.evaluations[i] is not None:
-                        eval_data = st.session_state.evaluations[i]
-                
-                        with st.expander(f"Detailed Evaluation for Q{i + 1}", expanded=True):
-                            col1, col2 = st.columns(2)
-                            with col1:
-                                st.markdown("### Your Answer")
-                                st.info(eval_data['user_answer'])
-                            with col2:
-                                st.markdown("### Documented Answer")
-                                st.info(eval_data['core_answer'])
-                    
-                            st.markdown("### Evaluation")
-                            if eval_data['is_correct']:
-                                st.success(f"✅ Correct - {eval_data['evaluation_notes']}")
-                                st.metric("Similarity Score", 
-                                        value=f"{eval_data['similarity_score']*100:.1f}%",
-                                        delta="High match with document")
-                            else:
-                                st.error(f"❌ Incorrect - {eval_data['evaluation_notes']}")
-                                st.metric("Similarity Score",
-                                        value=f"{eval_data['similarity_score']*100:.1f}%",
-                                        delta_color="inverse")
-                    
-                            st.markdown("### Source Information")
-                            st.markdown(eval_data['citation'])
-                    
-                            st.markdown("### Relevant Context from Document")
-                            st.markdown(f'<div class="source-box">{eval_data["context"]}</div>', unsafe_allow_html=True)
-
-except Exception as e:
-    import traceback
-    st.error("🚨 Application Error:")
-    st.code(traceback.format_exc())
-
+            if "evaluations" in st.session_state and st.session_state.evaluations:
+                for i, evaluation in enumerate(st.session_state.evaluations):
+                    if evaluation is None:
+                        continue
+                    user_ans, correct_ans, note, score, context = evaluation
+                    with st.expander(f"Evaluation Q{i+1}"):
+                        st.write(f"**Your Answer:** {user_ans}")
+                        st.write(f"**Document Answer:** {correct_ans}")
+                        st.write(f"**Result:** {'✅ Correct' if note=='High similarity' else '❌ Incorrect'}")
+                        st.metric("Similarity", f"{score*100:.1f}%", note)
+                        st.markdown(f"<div class='source-box'>{context}</div>", unsafe_allow_html=True)
+        else:
+            st.warning("⚠️ Unable to generate valid questions from the document.")
